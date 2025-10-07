@@ -1,3 +1,11 @@
+
+<br>
+
+<p align="center">  
+  <img src="vwap_network_logo.png" width="400" alt="VWAP Network Logo">
+</p>
+
+
 # 🚀 VWAP NETWORK
 
 The **VWAP Network** project aims to provide a **general-purpose framework** for training **MLP/RNN models** on **financial and cryptocurrency data**, along with modules for **data retrieval** and **transformation** — making them directly usable for machine learning workflows.
@@ -125,4 +133,3 @@ print(summary_df.head())
 
 ```
 
----
