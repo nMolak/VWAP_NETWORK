@@ -1,0 +1,11 @@
+__pycache__/
+.idea/
+*.csv
+*.pkl
+*.h5
+*.keras
+model_names
+data/
+diagnostics*/
+models/
+scalers/
