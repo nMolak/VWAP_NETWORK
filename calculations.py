@@ -1,8 +1,8 @@
-import pandas_ta as ta
-import pandas as pd
 import numpy as np
-
-from typing import Dict, Any
+import pandas as pd
+import pandas_ta as ta
+import logging
+from typing import Dict
 
 # def calc_indicators(df) -> Dict[str, any]:
 #     df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -68,11 +68,29 @@ from typing import Dict, Any
 #
 #     return out
 
-import numpy as np
-import pandas as pd
-import pandas_ta as ta
-import logging
-from typing import Dict
+def calc_vwap(df):
+    df = df.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    hl2 = (df["high"] + df["low"]) / 2
+
+    grouped_date = df["timestamp"].dt.date
+    vwapsum   = (hl2 * df["volume"]).groupby(grouped_date).cumsum()
+    volumesum = df["volume"].groupby(grouped_date).cumsum()
+
+    vwap = vwapsum / volumesum
+    return pd.Series(vwap, index=df.index, name="vwap")
+
+def calc_vwap_sigma(df):
+    df["timestamp"] = pd.to_datetime(df["timestamp"])   # KONWERSJA
+
+    hl2 = (df["high"] + df["low"]) / 2
+    grouped_date = df["timestamp"].dt.date
+    vwapsum   = (hl2 * df["volume"]).groupby(grouped_date).cumsum()
+    volumesum = df["volume"].groupby(grouped_date).cumsum()
+    v2sum     = (df["volume"] * hl2**2).groupby(grouped_date).cumsum()
+    vwap = vwapsum / volumesum
+    variance = v2sum / volumesum - vwap**2
+    return variance.clip(lower=0) ** 0.5
 
 # Ustaw bazowy logger (lub wkomponuj w swój)
 logging.basicConfig(level=logging.INFO)
@@ -124,18 +142,8 @@ def calc_indicators(df: pd.DataFrame, eps: float = 1e-12) -> Dict[str, pd.Series
     _log_stats(hl2, "hl2", idx)
 
     # === VWAP ===
-    grouped_date = df["timestamp"].dt.date
-    vwapsum   = (hl2 * df["volume"]).groupby(grouped_date).cumsum()
-    volumesum = df["volume"].groupby(grouped_date).cumsum()
-
-    _log_stats(volumesum, "volumesum(cumsum by day)", idx)
-    zero_vol = (volumesum == 0)
-    if zero_vol.any():
-        zidx = idx[zero_vol][:5].tolist()
-        log.info(f"[volumesum] zeros={int(zero_vol.sum())}, first idx={zidx}")
-
-    volumesum_safe = volumesum.replace(0, np.nan)
-    vwap = vwapsum / volumesum_safe
+    #vwap = vwapsum / volumesum_safe
+    vwap = calc_vwap(df)
     _log_stats(vwap, "vwap(raw)", idx)
 
     # === BB / KC ===
@@ -273,7 +281,6 @@ def calc_indicators(df: pd.DataFrame, eps: float = 1e-12) -> Dict[str, pd.Series
         log.info("[SUMMARY] Brak NaN/±inf w kolumnach wyjściowych.")
 
     return out
-
 
 def calc_vwap(df):
     df = df.copy()

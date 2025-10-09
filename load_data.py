@@ -1,44 +1,6 @@
 import sys
 import platform
 import importlib
-print("=== SYSTEM / PYTHON ===")
-print(f"Python: {sys.version}")
-print(f"Platform: {platform.system()} {platform.release()}")
-print(f"Architecture: {platform.architecture()[0]}")
-print()
-
-packages = [
-    "tensorflow",
-    "keras",
-    "torch",
-    "numpy",
-    "pandas",
-    "scipy",
-    "sklearn",
-    "joblib",
-    "matplotlib",
-    "h5py",
-]
-
-print("=== PACKAGE VERSIONS ===")
-for pkg in packages:
-    try:
-        module = importlib.import_module(pkg)
-        ver = getattr(module, "__version__", "no __version__ attr")
-        print(f"{pkg:15s}: {ver}")
-    except ImportError:
-        print(f"{pkg:15s}: NOT INSTALLED")
-print()
-
-# Dodatkowe info o GPU
-try:
-    import tensorflow as tf
-    print("=== TENSORFLOW DETAILS ===")
-    print("TF version:", tf.__version__)
-    print("Keras API version:", tf.keras.__version__ if hasattr(tf, "keras") else "no tf.keras")
-    print("GPU devices:", tf.config.list_physical_devices("GPU"))
-except Exception as e:
-    print("TensorFlow check failed:", e)
 
 import ccxt
 import time
@@ -61,11 +23,47 @@ import sys
 import platform
 import importlib
 
+def modules_diagnostics():
 
+    print("=== SYSTEM / PYTHON ===")
+    print(f"Python: {sys.version}")
+    print(f"Platform: {platform.system()} {platform.release()}")
+    print(f"Architecture: {platform.architecture()[0]}")
 
+    packages = [
+        "tensorflow",
+        "keras",
+        "torch",
+        "numpy",
+        "pandas",
+        "scipy",
+        "sklearn",
+        "joblib",
+        "matplotlib",
+        "h5py",
+    ]
 
+    print("=== PACKAGE VERSIONS ===")
+    for pkg in packages:
+        try:
+            module = importlib.import_module(pkg)
+            ver = getattr(module, "__version__", "no __version__ attr")
+            print(f"{pkg:15s}: {ver}")
+        except ImportError:
+            print(f"{pkg:15s}: NOT INSTALLED")
+    print()
 
-#Funkcja musi przyjmować i zwracać df
+    # Dodatkowe info o GPU
+    try:
+        import tensorflow as tf
+        print("=== TENSORFLOW DETAILS ===")
+        print("TF version:", tf.__version__)
+        print("Keras API version:", tf.keras.__version__ if hasattr(tf, "keras") else "no tf.keras")
+        print("GPU devices:", tf.config.list_physical_devices("GPU"))
+    except Exception as e:
+        print("TensorFlow check failed:", e)
+
+#func musi przyjmować i zwracać df
 def modify_all_csv(relative_data_path, func):
     path = Path(relative_data_path)
 
@@ -105,11 +103,6 @@ def fetch_ohlcv_df(ticker, interval, start_year, start_month, start_day):
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     return df
 
-
-def get_prefix_upper(s: str) -> str:
-    return s.split("_", 1)[0].upper()
-
-
 def iterate_over_folder_and_save(tickers, interval, start_year, start_month, start_day, path, log=False):
     folder_path = Path(path)
     folder_path.mkdir(parents=True, exist_ok=True)
@@ -132,24 +125,11 @@ def iterate_over_folder_and_save(tickers, interval, start_year, start_month, sta
         df.to_csv(file_path, index=False)
 
         logprint(f"Do folderu {ticker_dir} zapisano plik {new_filename}")
-        logprint(f"Długość ramki danych: {len(df)} | "
+        logprint(f"len(df = {len(df)} | "
                  f"najwcześniejsza data: {df.iloc[0]['timestamp']} | "
                  f"najpóźniejsza: {df.iloc[-1]['timestamp']}")
 
-# tickers = ["BTC/USDT", "BNB/USDT", "DOGE/USDT", "HBAR/USDT", "SUI/USDT", "XLM/USDT"]
-#
-# interval = "1m"
-# start_year, start_month, start_day = 2021, 1, 1
-# data_path = "data/1m/test_data"
-#
-# iterate_over_folder_and_save(tickers, interval, start_year, start_month, start_day, data_path, log=True)
-#
-
-
-
-from pathlib import Path
 import pandas as pd
-import numpy as np
 import logging
 
 logger = logging.getLogger(__name__)
@@ -178,7 +158,8 @@ def iterate_over_folder_and_save_features(
     calc_func,
     log: bool = True,
     filename_prefix: str = "features",
-    compression: str = "snappy"
+    compression: str = "snappy",
+    do_backup: bool = False
 ):
     """
     Przechodzi po folderach tickerów (każdy zawiera 1 plik CSV),
@@ -188,17 +169,12 @@ def iterate_over_folder_and_save_features(
       - CSV musi dać się znormalizować do posiadania kolumny 'timestamp' (ms int64)
       - calc_func zwraca dict lub DataFrame; długość = długość wejściowego df po normalizacji.
     """
+
     def logprint(*args, **kwargs):
         if log:
             logger.info(" ".join(str(a) for a in args))
 
-    data_path = Path(data_path)
-    if not data_path.exists():
-        raise FileNotFoundError(f"Ścieżka nie istnieje: {data_path}")
-
-    for ticker_folder in sorted([p for p in data_path.iterdir() 
-                             if p.is_dir() and not p.name.startswith(".")]):
-
+    def get_csv(ticker_folder: Path) -> pd.DataFrame:
         logprint(f"===> Przechodzę do folderu: {ticker_folder}")
 
         # pokaż jakie pliki są w folderze
@@ -217,67 +193,134 @@ def iterate_over_folder_and_save_features(
         logprint(f"[{ticker_folder.name}] wczytuję plik CSV: {csv_file.name}")
         df = pd.read_csv(csv_file)
 
-
         # Upewnij się, że mamy timestamp w ms i brak duplikatów
         df = _ensure_timestamp_col(df)
         n_df = len(df)
         t0, t1 = df['timestamp'].iloc[0], df['timestamp'].iloc[-1]
         logprint(f"[{ticker_folder.name}] zakres: {t0} → {t1} (ms), n={n_df}")
 
-        # Oblicz featury
-        out = calc_func(df.copy())
-        if isinstance(out, dict):
-            features_df = pd.DataFrame(out, index=df.index)
-        elif isinstance(out, pd.DataFrame):
-            features_df = out.copy()
-        else:
-            raise TypeError("calc_func musi zwracać dict lub pandas.DataFrame")
+        return df
 
-        # Walidacja długości i indeksu
-        if len(features_df) != n_df:
-            # Jeżeli calc_func samo dorzuciło timestamp i można zmergować – spróbujmy:
-            can_merge = 'timestamp' in features_df.columns
-            if can_merge:
-                tmp = df[['timestamp']].merge(
-                    features_df, on='timestamp', how='inner', validate='one_to_one'
-                )
-                logprint(f"[{ticker_folder.name}] align po 'timestamp': n={len(tmp)} (df={n_df})")
-                if len(tmp) != n_df:
-                    raise ValueError(
-                        f"[{ticker_folder.name}] Po align n_features={len(tmp)} != n_df={n_df}. "
-                        f"Ujednolić pipeline (dropna/obcięcia) przed calc_func.")
-                # Po align – zachowujemy kolejność jak w df
-                features_df = tmp.set_index(df.index)
+
+
+    data_path = Path(data_path)
+    if not data_path.exists():
+        raise FileNotFoundError(f"Ścieżka nie istnieje: {data_path}")
+
+    from parameters import features_data_mode
+
+    if features_data_mode == 'parquet':
+        for ticker_folder in sorted([p for p in data_path.iterdir()
+                                 if p.is_dir() and not p.name.startswith(".")]):
+
+            df = get_csv(ticker_folder)
+            n_df = len(df)
+
+            out = calc_func(df)
+            if isinstance(out, dict):
+                features_df = pd.DataFrame(out, index=df.index)
+            elif isinstance(out, pd.DataFrame):
+                features_df = out.copy()
             else:
-                raise ValueError(
-                    f"[{ticker_folder.name}] Długość outputu calc_func ({len(features_df)}) "
-                    f"≠ długości df ({n_df}) i brak kolumny 'timestamp' w featurach do merge.")
+                raise TypeError("calc_func musi zwracać dict lub pandas.DataFrame")
 
-        # Wstrzyknij timestamp jako pierwszą kolumnę – zawsze na bazie df
-        if 'timestamp' in features_df.columns:
-            features_df = features_df.drop(columns=['timestamp'])
+            features_df.columns = [f"feature_{col}" if col != 'timestamp' else col for col in features_df.columns]
 
-        # używamy datetime64 z df, żeby było spójne w całym pipeline
-        features_df.insert(0, 'timestamp', df['timestamp'])
+            if len(features_df) != n_df:
+                logprint(
+                f"Długość ramki zbudowanej z funkcji {calc_func.__name__} nie zgadza się: {len(features_df)} != {n_df}")
+                can_merge = 'timestamp' in features_df.columns
+                if can_merge:
+                    tmp = df[['timestamp']].merge(
+                        features_df, on='timestamp', how='inner', validate='one_to_one'
+                    )
+                    logprint(f"[{ticker_folder.name}] align po 'timestamp': n={len(tmp)} (df={n_df})")
+                    if len(tmp) != n_df:
+                        raise ValueError(
+                            f"[{ticker_folder.name}] Po align n_features={len(tmp)} != n_df={n_df}. "
+                            f"Ujednolić pipeline (dropna/obcięcia) przed calc_func.")
+                    # Po align – zachowujemy kolejność jak w df
+                    features_df = tmp.set_index(df.index)
+                else:
+                    raise ValueError(
+                        f"[{ticker_folder.name}] Długość outputu calc_func ({len(features_df)}) "
+                        f"≠ długości df ({n_df}) i brak kolumny 'timestamp' w featurach do merge.")
 
-        # Zapis
-        feature_folder = ticker_folder / "features"
-        feature_folder.mkdir(parents=True, exist_ok=True)
+            # Wstrzyknij timestamp jako pierwszą kolumnę – zawsze na bazie df
+            if 'timestamp' in features_df.columns:
+                features_df = features_df.drop(columns=['timestamp'])
 
-        existing = sorted([f for f in feature_folder.iterdir() if f.suffix == ".parquet"])
-        features_number = len(existing)
-        filepath = feature_folder / f"{filename_prefix}{features_number:02d}.parquet"
+            # używamy datetime64 z df, żeby było spójne w całym pipeline
+            features_df.insert(0, 'timestamp', df['timestamp'])
 
-        features_df.to_parquet(filepath, index=False, compression=compression)
 
-        # Log końcowy: len(df) vs len(parquet)
-        n_parq = len(features_df)
-        logprint(f"[{ticker_folder.name}] Zapisano: {filepath.name} | len(df)={n_df}, len(parquet)={n_parq}")
-        if n_parq != n_df:
-            raise AssertionError(
-                f"[{ticker_folder.name}] len(parquet) ({n_parq}) != len(df) ({n_df}) – sprawdź pipeline!"
-                )
+            feature_folder = ticker_folder / "features"
+            feature_folder.mkdir(parents=True, exist_ok=True)
 
+            existing = [f for f in feature_folder.iterdir() if f.suffix == ".parquet"]
+            features_number = len(existing)
+            filepath = feature_folder / f"{filename_prefix}{features_number:02d}.parquet"
+
+            features_df.to_parquet(filepath, index=False, compression=compression)
+
+            n_parq = len(features_df)
+            logprint(f"[{ticker_folder.name}] Zapisano: {filepath.name} | len(df)={n_df}, len(parquet)={n_parq}")
+            if n_parq != n_df:
+                raise AssertionError(
+                    f"[{ticker_folder.name}] len(parquet) ({n_parq}) != len(df) ({n_df}) – sprawdź pipeline!"
+                    )
+
+    elif features_data_mode == 'dataframe':
+        for ticker_folder in sorted([p for p in data_path.iterdir()
+                                     if p.is_dir() and not p.name.startswith(".")]):
+
+            df = get_csv(ticker_folder)
+            n_df = len(df)
+
+            out = calc_func(df)
+            if isinstance(out, dict):
+                features_df = pd.DataFrame(out, index=df.index)
+            elif isinstance(out, pd.DataFrame):
+                features_df = out.copy()
+            else:
+                raise TypeError("calc_func musi zwracać dict lub pandas.DataFrame")
+
+            features_df.columns = [
+                f"feature_{col}" if col != "timestamp" else col
+                for col in features_df.columns
+            ]
+
+            if len(features_df) != n_df:
+                logprint(f"Długość ramki zbudowanej z funkcji {calc_func.__name__} nie zgadza się: {len(features_df)} != {n_df}")
+                if 'timestamp' in features_df.columns:
+                    tmp = df[['timestamp']].merge(
+                        features_df, on='timestamp', how='inner', validate='one_to_one'
+                    )
+                    logprint(f"[{ticker_folder.name}] Align po timestamp: n={len(tmp)} (df={n_df})")
+                    features_df = tmp.set_index(df.index)
+                else:
+                    raise ValueError(
+                        f"[{ticker_folder.name}] Długość outputu calc_func ({len(features_df)}) "
+                        f"!= długości df ({n_df}) i brak kolumny 'timestamp' do wyrównania."
+                    )
+            else:
+                logprint(f"[{ticker_folder.name}] ✅ Długość df i features_df zgodna: {n_df}")
+
+            merged_df = pd.concat([df, features_df], axis=1)
+
+            csv_file = next(ticker_folder.glob("*.csv"), None)
+            if csv_file is None:
+                raise FileNotFoundError(f"[{ticker_folder.name}] Brak pliku CSV do nadpisania.")
+
+            if do_backup:
+                backup_path = csv_file.with_suffix(".bak.csv")
+                csv_file.rename(backup_path)
+                merged_df.to_csv(csv_file, index=False)
+
+                logprint(
+                    f"[{ticker_folder.name}] ✅ Dopisano kolumny feature_ i zapisano z powrotem do CSV ({csv_file.name})")
+            else:
+                merged_df.to_csv(csv_file, index=False)
 
 
 
@@ -744,7 +787,6 @@ def analyze_labels_in_folder(base_path: str, label_functions, filters=None, sigm
 from functools import partial
 from labels import calc_label10
 
-# # 🧠 Top 5 najbardziej zrównoważonych i obiecujących wersji labela:
 # label_top_partials = [
 #     partial(calc_label10, T=45, alpha=0.65, use_atr=False),  # ✅ najlepszy balans 0/1/2 (~28/28/44)
 #     partial(calc_label10, T=40, alpha=0.65, use_atr=False),  # bardzo stabilny, trochę więcej stagnacji

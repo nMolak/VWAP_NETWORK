@@ -8,13 +8,27 @@
 
 #=== Iteracja po modelach i zapisanie ich nazw do .txt w celu dalszej analizy ===
 
-from load_data import save_model_names
+# from load_data import save_model_names
+#
+# class3_models_path = "models/3_class"
+# output_file_name = "model_names.txt"
+# n_classes = 3
+#
+# save_model_names(class3_models_path, output_file_name, n_classes)
 
-class3_models_path = "models/3_class"
-output_file_name = "model_names.txt"
-n_classes = 3
 
-save_model_names(class3_models_path, output_file_name, n_classes)
+#=== Diagnostyka modułów / wersji pythona ===
+
+# from load_data import modules_diagnostics
+# modules_diagnostics()
+
+#=== Wczytanie featurów do istniejących ramek danych ===
+
+from load_data import iterate_over_folder_and_save_features
+from calculations import calc_indicators
+
+data_path = 'data/training_data'
+iterate_over_folder_and_save_features(data_path, calc_indicators)
 
 
 
