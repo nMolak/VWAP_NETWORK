@@ -36,8 +36,7 @@ At the current stage, the project is **not yet functional** — the codebase is 
 - Better **modular structure** for analytical functions  
 - Integration of **macroeconomic event filters**  
 - **Vectorization** and optimization of existing label functions 
-- Improved **feature I/O system** (reading/writing workflow)  
-
+- Improved **feature I/O system** (reading/writing workflow)
 - Optimalisation of tensorflow through better GPU usage.
 
 ---
@@ -79,11 +78,7 @@ from calculations import calc_indicators
 from load_data import iterate_over_folder_and_save_features
 
 data_path = "data/1m/training_data"
-iterate_over_folder_and_save_features(
-    data_path=data_path,
-    calc_func=calc_indicators,
-    log=True
-)
+iterate_over_folder_and_save_features(data_path=data_path, calc_func=calc_indicators, log=True)
 ```
 
 

@@ -2,26 +2,28 @@ import sys
 import platform
 import importlib
 
+#TODO ADD GOOGLE-STYLE DOCSTRING TO WHOLE PROJECT
+
 import ccxt
 import time
 from datetime import datetime
 import matplotlib.pyplot as plt
-#from tensorflow.keras.models import load_model
 
+#from tensorflow.keras.models import load_model
 #from keras.models import load_model
 from tensorflow.keras.models import load_model
 
-from pathlib import Path
-import pandas as pd
-import numpy as np
-import os
+from utils import get_func_name
+from utils import make_logprint
+
+
 
 from calculations import *
-from utils import logprint
 
 import sys
 import platform
 import importlib
+
 
 def modules_diagnostics():
 
@@ -107,6 +109,8 @@ def iterate_over_folder_and_save(tickers, interval, start_year, start_month, sta
     folder_path = Path(path)
     folder_path.mkdir(parents=True, exist_ok=True)
 
+    logprint = make_logprint(log)
+
     logprint(f"Będę działał w folderze {path} - przechodzę do pętli")
     for ticker in tickers:
         logprint(f"Ściągam teraz dane {ticker}")
@@ -153,14 +157,9 @@ def _ensure_timestamp_col(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values("timestamp").drop_duplicates("timestamp", keep="first")
     return df
 
-def iterate_over_folder_and_save_features(
-    data_path,
-    calc_func,
-    log: bool = True,
-    filename_prefix: str = "features",
-    compression: str = "snappy",
-    do_backup: bool = False
-):
+def iterate_over_folder_and_save_features(data_path, calc_func, do_backup: bool = False,
+                                          filename_prefix: str = "features", compression: str = "snappy",
+                                          log: bool = True):
     """
     Przechodzi po folderach tickerów (każdy zawiera 1 plik CSV),
     liczy featury funkcją `calc_func(df)` i zapisuje do Parquet z kolumną 'timestamp'.
@@ -170,9 +169,7 @@ def iterate_over_folder_and_save_features(
       - calc_func zwraca dict lub DataFrame; długość = długość wejściowego df po normalizacji.
     """
 
-    def logprint(*args, **kwargs):
-        if log:
-            logger.info(" ".join(str(a) for a in args))
+    logprint = make_logprint(log)
 
     def get_csv(ticker_folder: Path) -> pd.DataFrame:
         logprint(f"===> Przechodzę do folderu: {ticker_folder}")
@@ -322,9 +319,84 @@ def iterate_over_folder_and_save_features(
             else:
                 merged_df.to_csv(csv_file, index=False)
 
+def diagnose_mean_and_variance(data_path, log=True):
+
+    from utils import check_feature_consistency
+    from utils import display_dataframe
+    #TODO: Po każdej sumie napisać zakres. Lepiej poukładać kolejność wypisywania
+
+    print(f"Wykonuje się funkcja {get_func_name()} - znajdujemy się w ścieżce {data_path}")
+
+    check_feature_consistency(data_path)
+
+    data_path = Path(data_path)
+    feature_cols = None
+    logprint = make_logprint(log)
+
+    if features_data_mode == "parquet":
+        raise NotImplementedError("Tryb feature parquet obecnie niedostępny!")
+    elif features_data_mode == "dataframe":
+        local_stats_mean, local_stats_dev = {}, {}
+        for ticker_folder in sorted([p for p in data_path.iterdir() if p.is_dir() and not p.name.startswith(".")]):
+            #Najpierw przeszukiwanie globalne
+
+            local_stats_mean[ticker_folder.name] = []
+            local_stats_dev[ticker_folder.name] = []
+            csv = next(ticker_folder.glob("*.csv"), None)
+            df = pd.read_csv(csv)
+            logprint(f"Analizuję plik {csv}")
+
+            feature_cols = [col for col in df.columns if col.startswith('feature_')]
+            logprint(f"Oto featury: {feature_cols}")
+
+            for feature in feature_cols:
+                local_stats_mean[ticker_folder.name].append(np.mean(df[feature]))
+                local_stats_dev[ticker_folder.name].append(np.std(df[feature]))
+
+        if feature_cols == None:
+            raise ValueError("feature_cols == None -> błąd w funkcji!")
+
+        mean_values = pd.DataFrame(local_stats_mean, index=feature_cols)
+        dev_values = pd.DataFrame(local_stats_dev, index=feature_cols)
+
+        display_dataframe(mean_values, title="ŚREDNIE LOKALNE", precision=4)
+        display_dataframe(dev_values, title="ODCHYLENIA LOKALNE", precision=4)
+
+        mean_values_std = mean_values.std(axis=1)
+        dev_values_std = dev_values.std(axis=1)
+
+        mean_values_std = pd.DataFrame(mean_values_std, columns=["mean_std_between_files"])
+        dev_values_std = pd.DataFrame(dev_values_std, columns=["dev_std_between_files"])
+
+        display_dataframe(mean_values_std, title="Odchylenia średnich względem plików - jak 'stabilna' jest średnia danego feature'a w różnych plikach?")
+        display_dataframe(dev_values_std, title="Odchylenia odchyleń względem plików - jak 'stabilne' są odchylenia danego feature'a w różnych plikach?")
+
+
+
+        mean_values_sum_row = pd.DataFrame(mean_values.sum(axis=0)).T
+        mean_values_sum_row.index = ["Suma średnich po pliku"]
+
+        dev_values_sum_row = pd.DataFrame(dev_values.sum(axis=0)).T
+        dev_values_sum_row.index = ["Suma odchyleń po pliku"]
+
+        display_dataframe(mean_values_sum_row, title="Suma średnich po pliku - jak średnie featurów różnią się pomiędzy plikami?")
+        min_val, max_val = mean_values_sum_row.iloc[0].min(), mean_values_sum_row.iloc[0].max()
+        print(f"Min: {min_val}, Max: {max_val}, Range: {max_val - min_val}")
+
+        display_dataframe(dev_values_sum_row, title="Suma odchyleń po pliku - jak odchylenia featurów różnią się pomiędzy plikami?")
+        min_val, max_val = dev_values_sum_row.iloc[0].min(), dev_values_sum_row.iloc[0].max()
+        print(f"Min: {min_val}, Max: {max_val}, Range: {max_val - min_val}")
+
+        print("\n\n\n\n")
+
+        return mean_values, dev_values
+
 
 
 def remove_all_features(data_path, log=True):
+    """
+    Funkcja pomocnicza, usuwa pliki .parquet zawierające featury.
+    """
     data_path = Path(data_path)
     for ticker_folder in data_path.iterdir():
         if ticker_folder.is_dir():
