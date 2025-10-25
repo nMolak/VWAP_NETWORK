@@ -23,6 +23,7 @@ from calculations import *
 import sys
 import platform
 import importlib
+from pathlib import Path
 
 
 def modules_diagnostics():
@@ -82,6 +83,66 @@ def modify_all_csv(relative_data_path, func):
 
 from parameters import *
 from filters import apply_filters
+
+def repair_volume(df: pd.DataFrame, N: int = 10, log: bool = True) -> pd.DataFrame:
+    """
+    Uzupełnia zerowe wolumeny na podstawie średniej z N najbliższych niezerowych wartości
+    po lewej i po prawej stronie (jeśli dostępne).
+
+    Parametry:
+    - df: ramka z kolumną 'volume'
+    - N: liczba próbek niezerowych do uśrednienia po każdej stronie
+    - log: czy wypisywać diagnostykę (czas, liczba zmian)
+
+    Zwraca:
+    - kopię df z poprawionym 'volume'
+    """
+    from utils import make_logprint
+
+    logprint = make_logprint(log)
+    t0 = time.time()
+
+    assert "volume" in df.columns, "Brak kolumny 'volume' w ramce danych."
+    df = df.copy()
+    vol = df["volume"].to_numpy(dtype=float)
+    n = len(vol)
+    affected = 0
+
+    zero_idx = np.where(vol == 0)[0]
+    if len(zero_idx) == 0:
+        logprint("[repair_volume] Brak zerowych wolumenów — nic nie naprawiono.")
+        return df
+
+    for i in zero_idx:
+        left_vals, right_vals = [], []
+
+        # szukaj N niezerowych wartości w lewo
+        j = i - 1
+        while j >= 0 and len(left_vals) < N:
+            if vol[j] != 0:
+                left_vals.append(vol[j])
+            j -= 1
+
+        # szukaj N niezerowych wartości w prawo
+        j = i + 1
+        while j < n and len(right_vals) < N:
+            if vol[j] != 0:
+                right_vals.append(vol[j])
+            j += 1
+
+        neigh = left_vals + right_vals
+        if neigh:
+            vol[i] = np.mean(neigh)
+            affected += 1
+
+    df["volume"] = vol
+
+    dt = time.time() - t0
+    logprint(f"[repair_volume] Naprawiono {affected:,} zerowych wolumenów z {n:,} ({affected/n:.4%}).")
+    logprint(f"[repair_volume] Czas wykonania: {dt:.3f} s")
+
+    return df
+
 
 
 def fetch_ohlcv_df(ticker, interval, start_year, start_month, start_day):
@@ -323,7 +384,7 @@ def diagnose_mean_and_variance(data_path, log=True):
 
     from utils import check_feature_consistency
     from utils import display_dataframe
-    #TODO: Po każdej sumie napisać zakres. Lepiej poukładać kolejność wypisywania
+    #Lepiej poukładać kolejność wypisywania
 
     print(f"Wykonuje się funkcja {get_func_name()} - znajdujemy się w ścieżce {data_path}")
 
@@ -407,23 +468,6 @@ def remove_all_features(data_path, log=True):
                     if log:
                         print(f"Usunięto {parquet_file}")
 
-
-# from calculations import calc_indicators
-# calc_func = calc_indicators
-# data_path = "data/test_data"
-# remove_all_features(data_path)
-# iterate_over_folder_and_save_features(
-#     data_path=data_path,
-#     calc_func=calc_func,
-#     log=True
-# )
-
-# tickers = ["TON/USDT"]
-# interval = "1m"
-# start_year, start_month, start_day = 2021, 1, 1
-# path = "data/test_data"
-# iterate_over_folder_and_save(tickers, interval, start_year, start_month, start_day, path)
-
 def add_VWAP(df, sigma_mult=2.15) -> pd.DataFrame:
     df["timestamp"] = pd.to_datetime(df["timestamp"])
 
@@ -447,8 +491,15 @@ def add_VWAP(df, sigma_mult=2.15) -> pd.DataFrame:
 
 def add_indicators(df) -> pd.DataFrame:
     ind = calc_indicators(df)
+
+    existing_features = [col for col in df.columns if col.startswith("feature_")]
+    valid_features = [f"feature_{k}" for k in ind.keys()]
+    to_drop = [col for col in existing_features if col not in valid_features]
+    df = df.drop(columns=to_drop, errors="ignore")
+
     for k, v in ind.items():
         df[f"feature_{k}"] = v
+
     return df
 
 def analyze_indicators(df, filters, log=False):
@@ -476,8 +527,6 @@ def analyze_indicators(df, filters, log=False):
         q25, q75 = s.quantile([0.25, 0.75])
         print(f"  IQR     = {q75 - q25:.6f}")
         print(f"  count   = {len(s)}\n")
-
-
 
 def get_info(df, name: str, sigma: float, filters: list):
     df_len = len(df)
@@ -660,11 +709,6 @@ def analyze_labels_with_filters(df, filters, label_functions):
             print(f"  entropia: {entropy:.3f}, dominująca klasa: {dominant_class} "
                   f"({dominant_share:.1f}%)\n")
 
-import pandas as pd
-import numpy as np
-from pathlib import Path
-import inspect
-
 def analyze_labels_in_folder(base_path: str, label_functions, filters=None, sigma_val: float = 2.45):
     """
     Analizuje rozkład etykiet dla wszystkich plików CSV w folderze base_path,
@@ -798,7 +842,6 @@ def analyze_labels_in_folder(base_path: str, label_functions, filters=None, sigm
 
     print(f"\n✅ Zapisano pełne podsumowanie do pliku: {output_csv.resolve()}")
     return all_counts, summary_df
-
 
 
 

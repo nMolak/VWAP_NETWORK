@@ -1,8 +1,8 @@
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
-import logging
 from typing import Dict
+import time
 
 # def calc_indicators(df) -> Dict[str, any]:
 #     df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -92,193 +92,171 @@ def calc_vwap_sigma(df):
     variance = v2sum / volumesum - vwap**2
     return variance.clip(lower=0) ** 0.5
 
-# Ustaw bazowy logger (lub wkomponuj w swój)
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("features-diag")
-
-def _log_stats(s: pd.Series, name: str, idx: pd.Index, max_show: int = 5):
-    """Zbiorcza diagnostyka serii/liczbowej kolumny."""
-    if not isinstance(s, pd.Series):
-        s = pd.Series(s, index=idx)
-
-    arr = s.to_numpy(dtype="float64")
-    is_nan = np.isnan(arr)
-    is_posinf = np.isposinf(arr)
-    is_neginf = np.isneginf(arr)
-
-    n = len(arr)
-    n_nan = int(is_nan.sum())
-    n_posinf = int(is_posinf.sum())
-    n_neginf = int(is_neginf.sum())
-
-    # Indeksy problematyczne
-    nan_idx = s.index[is_nan][:max_show].tolist() if n_nan else []
-    pinf_idx = s.index[is_posinf][:max_show].tolist() if n_posinf else []
-    ninf_idx = s.index[is_neginf][:max_show].tolist() if n_neginf else []
-
-    log.info(f"[{name}] n={n} | NaN={n_nan} (+inf={n_posinf}, -inf={n_neginf})")
-    if nan_idx:
-        log.info(f"    -> first NaN idx: {nan_idx}")
-    if pinf_idx:
-        log.info(f"    -> first +inf idx: {pinf_idx}")
-    if ninf_idx:
-        log.info(f"    -> first -inf idx: {ninf_idx}")
-
-def calc_indicators(df: pd.DataFrame, eps: float = 1e-12) -> Dict[str, pd.Series]:
+def calc_indicators(df: pd.DataFrame, eps: float = 1e-12, log: bool = True) -> Dict[str, pd.Series]:
     """
-    Alternatywna (diagnostyczna) wersja calc_indicators:
-    - pełne logi po każdym etapie
-    - wykrywa źródła NaN/±inf/zerowych mianowników
+    Diagnostyczna wersja calc_indicators:
+    - log=True włącza raport na końcu
+    - zbiera statystyki mean/std/nan/inf
+    - dodatkowo wykrywa 'środkowe' NaN/inf
+    - loguje czas całkowity obliczeń
     """
+    from utils import make_logprint
+    logprint = make_logprint(log)
+    t0 = time.time()
+
     assert "timestamp" in df.columns, "Wymagam kolumny 'timestamp' (ms lub datetime)."
-    # Ujednolicenie timestamp -> datetime (dla groupby po dniu)
     ts = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce") if np.issubdtype(df["timestamp"].dtype, np.integer) else pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.copy()
+
+    # === DIAGNOSTYKA WOLUMENU ===
+    vol_zero_mask = df["volume"] == 0
+    n_zeros = int(vol_zero_mask.sum())
+    middle_zeros = 0
+    median_zero_date = None
+
+    if n_zeros > 0:
+        not_zero = ~vol_zero_mask
+        if not_zero.any():
+            first_valid = np.argmax(not_zero)  # pierwszy niezerowy
+            last_valid = len(df) - np.argmax(not_zero[::-1]) - 1  # ostatni niezerowy
+
+            # sprawdź, czy między nimi są zera
+            inner_mask = vol_zero_mask.iloc[first_valid:last_valid + 1]
+            middle_zeros = int(inner_mask.sum())
+
+            # medianowa data zerowych wolumenów
+            if middle_zeros > 0:
+                zero_dates = ts[vol_zero_mask]
+                median_zero_date = zero_dates.median()
+
+    # 0.05-kwantyl z wolumenu (dla niezerowych wartości)
+    vol_q005 = float(df.loc[df["volume"] > 0, "volume"].quantile(0.05))
+
+    logprint(f"[INFO] Wykryto {n_zeros:,} zerowych wolumenów (0.05-kwantyl: {vol_q005:.6f})")
+    if middle_zeros > 0:
+        logprint(f"[INFO] 🔸 Zera pośrodku danych: {middle_zeros:,} | Mediana dat zer: {median_zero_date}")
+    else:
+        logprint("[INFO] Brak zerowych wolumenów pośrodku danych.")
+
+    df["zero_run"] = (df["volume"] == 0).astype(int).groupby((df["volume"] != 0).cumsum()).cumsum()
+    long_zeros = df["zero_run"].max()
+    logprint(f"[INFO] Najdłuższa ciągła sekwencja zerowych wolumenów: {long_zeros}")
+
+
     df["timestamp"] = ts
     idx = df.index
 
-    # Podstawy
-    hl2 = (df["high"] + df["low"]) / 2.0
-    _log_stats(hl2, "hl2", idx)
+    out, stats = {}, {}
 
-    # === VWAP ===
-    #vwap = vwapsum / volumesum_safe
+    # === PODSTAWY ===
     vwap = calc_vwap(df)
-    _log_stats(vwap, "vwap(raw)", idx)
-
-    # === BB / KC ===
     bb = ta.bbands(df['close'], length=20, std=2.0)
     kc = ta.kc(df["high"], df["low"], df["close"], length=20, scalar=1.5)
-
     bb_lower, bb_mid, bb_upper = bb.iloc[:, 0], bb.iloc[:, 1], bb.iloc[:, 2]
     kc_lower, kc_mid, kc_upper = kc.iloc[:, 0], kc.iloc[:, 1], kc.iloc[:, 2]
-
-    bb_width = (bb_upper - bb_lower)
-    kc_width = (kc_upper - kc_lower)
-    _log_stats(bb_width, "bb_width(upper-lower)", idx)
-    _log_stats(kc_width, "kc_width(upper-lower)", idx)
-
-    zero_bb = (bb_width.abs() <= 0)
-    zero_kc = (kc_width.abs() <= 0)
-    if zero_bb.any():
-        log.info(f"[bb_width] zeros={int(zero_bb.sum())}, first idx={idx[zero_bb][:5].tolist()}")
-    if zero_kc.any():
-        log.info(f"[kc_width] zeros={int(zero_kc.sum())}, first idx={idx[zero_kc][:5].tolist()}")
-
-    # === EMA / ATR ===
-    ema20 = ta.ema(df["close"], length=20)
-    ema50 = ta.ema(df["close"], length=50)
+    ema20, ema50 = ta.ema(df["close"], length=20), ta.ema(df["close"], length=50)
     atr_abs = ta.atr(df["high"], df["low"], df["close"], length=14)
-
-    _log_stats(ema20, "ema20", idx)
-    _log_stats(ema50, "ema50", idx)
-    _log_stats(atr_abs, "atr_abs", idx)
-
-    # === RSI / WILLR / CCI / OBV ===
     rsi7 = ta.rsi(df["close"], length=7)
     willr14 = -ta.willr(df["high"], df["low"], df["close"], length=14)
     cci20 = ta.cci(df["high"], df["low"], df["close"], length=20)
     obv = ta.obv(df["close"], df["volume"])
 
-    _log_stats(rsi7, "rsi7", idx)
-    _log_stats(willr14, "willr14", idx)
-    _log_stats(cci20, "cci20", idx)
-    _log_stats(obv, "obv", idx)
-
-    out = {}
-
-    # --- vwap_dev ---
-    denom_vwap = (np.abs(vwap) + eps)
-    out["vwap_dev"] = (df['close'] - vwap) / denom_vwap
-    _log_stats(out["vwap_dev"], "vwap_dev", idx)
-    if (np.abs(vwap) <= 0).sum():
-        log.info(f"[vwap_dev] |vwap|==0 cases={int((np.abs(vwap) <= 0).sum())}")
-
-    # --- bb_pos / kc_pos ---
-    out["bb_pos"] = (df['close'] - bb_lower) / (np.abs(bb_width) + eps)
-    out["kc_pos"] = (df['close'] - kc_lower) / (np.abs(kc_width) + eps)
-    _log_stats(out["bb_pos"], "bb_pos", idx)
-    _log_stats(out["kc_pos"], "kc_pos", idx)
-
-    # --- rsi7 / willr14 / cci20 ---
+    # === FEATUREY ===
+    out["vwap_dev"] = (df['close'] - vwap) / (np.abs(vwap) + eps)
+    out["bb_pos"] = (df['close'] - bb_lower) / (np.abs(bb_upper - bb_lower) + eps)
+    out["kc_pos"] = (df['close'] - kc_lower) / (np.abs(kc_upper - kc_lower) + eps)
     out["rsi7"] = rsi7
     out["willr14"] = willr14
     out["cci20"] = cci20
 
-    # --- vwap_slope5 (pct_change może dać inf przy bazie=0) ---
-    # liczymy ręcznie, aby móc zdiagnozować mianownik
     vwap_shift5 = vwap.shift(5)
-    denom_vwap5 = (np.abs(vwap_shift5) + eps)
-    out["vwap_slope5"] = (vwap - vwap_shift5) / denom_vwap5
-    _log_stats(out["vwap_slope5"], "vwap_slope5(manual)", idx)
-    zero_base = (np.abs(vwap_shift5) <= 0).sum()
-    if zero_base:
-        log.info(f"[vwap_slope5] base==0 cases={int(zero_base)}")
-
-    # --- vol20 ---
+    out["vwap_slope5"] = (vwap - vwap_shift5) / (np.abs(vwap_shift5) + eps)
     out["vol20"] = np.log1p(df["volume"]).diff(20)
-    _log_stats(out["vol20"], "vol20(log1p.diff20)", idx)
-
-    # --- atr_rel ---
     out["atr_rel"] = atr_abs / (np.abs(df["close"]) + eps)
-    _log_stats(out["atr_rel"], "atr_rel", idx)
-
-    # --- ema_cross_dist / ema_ratio_slope5 ---
-    spread = ema20 - ema50
-    out["ema_cross_dist"] = spread / (np.abs(ema50) + eps)
-    _log_stats(out["ema_cross_dist"], "ema_cross_dist", idx)
-
+    out["ema_cross_dist"] = (ema20 - ema50) / (np.abs(ema50) + eps)
     ema_ratio = ema20 / (np.abs(ema50) + eps)
     out["ema_ratio_slope5"] = ema_ratio.diff(5)
-    _log_stats(out["ema_ratio_slope5"], "ema_ratio_slope5", idx)
-
-    # --- vwap_dev_atr / vwap_slope_acc10 ---
     out["vwap_dev_atr"] = (df["close"] - vwap) / (np.abs(atr_abs) + eps)
-    _log_stats(out["vwap_dev_atr"], "vwap_dev_atr", idx)
-
     out["vwap_slope_acc10"] = out["vwap_slope5"].diff(5)
-    _log_stats(out["vwap_slope_acc10"], "vwap_slope_acc10", idx)
 
-    # --- vwap_side_streak ---
     side = (df["close"] > vwap).astype("float64")
-    # gdy vwap NaN → side NaN → wykryjemy w logu
-    _log_stats(side, "side(close>vwap)", idx)
     grp = side.ne(side.shift()).cumsum()
     streak = side.groupby(grp).cumcount() + 1
     out["vwap_side_streak"] = streak.where(side == 1, -streak)
-    _log_stats(out["vwap_side_streak"], "vwap_side_streak", idx)
 
-    # --- rsi_pct100 ---
     rsi_roll = rsi7.rolling(100)
-    rsi_rank = rsi_roll.rank(pct=True)
-    out["rsi_pct100"] = rsi_rank
-    _log_stats(out["rsi_pct100"], "rsi_pct100(rank,win=100)", idx)
+    out["rsi_pct100"] = rsi_roll.rank(pct=True)
 
-    # --- z-score obv/cci (std==0 -> potencjalne inf; +eps) ---
-    obv_mean = obv.rolling(100).mean()
-    obv_std  = obv.rolling(100).std()
+    obv_mean, obv_std = obv.rolling(100).mean(), obv.rolling(100).std()
     out["obv_zscore100"] = (obv - obv_mean) / (np.abs(obv_std) + eps)
-    _log_stats(out["obv_zscore100"], "obv_zscore100", idx)
-
-    cci_mean = cci20.rolling(100).mean()
-    cci_std  = cci20.rolling(100).std()
+    cci_mean, cci_std = cci20.rolling(100).mean(), cci20.rolling(100).std()
     out["cci_zscore100"] = (cci20 - cci_mean) / (np.abs(cci_std) + eps)
-    _log_stats(out["cci_zscore100"], "cci_zscore100", idx)
 
-    # --- interakcja VWAP–RSI ---
     out["vwap_rsi_inter"] = ((df["close"] - vwap) / (np.abs(vwap) + eps)) * (rsi7 - 50.0)
-    _log_stats(out["vwap_rsi_inter"], "vwap_rsi_inter", idx)
 
-    # Podsumowanie kolumn, które mają problem
-    problem_cols = []
+    if not log:
+        return out
+
+    # === ZBIERANIE STATYSTYK ===
     for k, s in out.items():
-        s_ser = pd.Series(s, index=idx) if not isinstance(s, pd.Series) else s
-        if s_ser.isna().any() or np.isinf(s_ser.to_numpy(dtype="float64")).any():
-            problem_cols.append(k)
-    if problem_cols:
-        log.info(f"[SUMMARY] Kolumny z NaN/±inf: {sorted(problem_cols)}")
-    else:
-        log.info("[SUMMARY] Brak NaN/±inf w kolumnach wyjściowych.")
+        s_ser = pd.Series(s, index=idx)
+        is_nan = s_ser.isna()
+        is_inf = np.isinf(s_ser.to_numpy(dtype="float64"))
+        n_nan, n_inf = int(is_nan.sum()), int(is_inf.sum())
+
+        # analiza pozycji błędów (czy tylko na końcach)
+        bad_idx = np.where(is_nan | is_inf)[0]
+        middle_problem = False
+
+        if len(bad_idx) > 0:
+            # znajdź indeks pierwszego i ostatniego NIE-NaN
+            not_bad = ~(is_nan | is_inf)
+            if not_bad.any():
+                first_valid = np.argmax(not_bad)  # pierwszy poprawny
+                last_valid = len(s_ser) - np.argmax(not_bad[::-1]) - 1  # ostatni poprawny
+
+                # sprawdź, czy pomiędzy nimi są NaN
+                inner_mask = (is_nan | is_inf).iloc[first_valid:last_valid + 1]
+                if inner_mask.any():
+                    middle_problem = True
+
+        stats[k] = {
+            "nan": n_nan,
+            "inf": n_inf,
+            "mean": float(s_ser.mean(skipna=True)),
+            "std": float(s_ser.std(skipna=True)),
+            "middle_problem": middle_problem,
+        }
+
+    # === DIAGNOSTYKA DANYCH WEJŚCIOWYCH ===
+    for col in ["volume", "close"]:
+        s = df[col]
+        stats[col] = {
+            "nan": int(s.isna().sum()),
+            "zeros": int((s == 0).sum()),
+            "min": float(s.min(skipna=True)),
+            "max": float(s.max(skipna=True)),
+            "mean": float(s.mean(skipna=True)),
+            "std": float(s.std(skipna=True))
+        }
+
+    # === RAPORT KOŃCOWY ===
+    if log:
+        dt = time.time() - t0
+        logprint(f"[SUMMARY] Liczenie featurów zakończone w {dt:.3f} s")
+        logprint("[SUMMARY] Statystyki featurów:")
+        for k, v in stats.items():
+            if "middle_problem" in v:  # featury
+                msg = f"{k:20s} nan={v['nan']:4d}, inf={v['inf']:3d}, mean={v['mean']:+.6f}, std={v['std']:.6f}"
+                if v["middle_problem"]:
+                    msg += "  ⚠️  PROBLEM: NaN/inf w środku danych!"
+            else:  # dane wejściowe
+                msg = (
+                    f"{k:20s} nan={v['nan']:4d}, zeros={v['zeros']:4d}, "
+                    f"min={v['min']:+.6f}, max={v['max']:+.6f}, "
+                    f"mean={v['mean']:+.6f}, std={v['std']:.6f}"
+                )
+            logprint(msg)
 
     return out
 

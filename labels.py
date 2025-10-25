@@ -458,7 +458,7 @@ def calc_label9(df: pd.DataFrame,
                      alpha: float = 0.2,
                      use_atr: bool = False) -> pd.Series:
     """
-    Wektorowa wersja calc_label9.
+    Funkcja musi być zwektoryzowana, a wektor numpy nie przechowa None, więc daję -1
     Wynik: Series 0/1, identyczny logicznie z wersją pętlową.
     """
 
@@ -474,10 +474,11 @@ def calc_label9(df: pd.DataFrame,
             print("Brak feature_atr_rel - liczę scale alternatywnie!")
             scale = (df["close"] - df["vwap"]).abs().to_numpy(float) + 1e-12
     else:
-        scale = (df["close"] - df["vwap"]).abs().to_numpy(float) + 1e-12
+        scale = (df["close"] - df["vwap"]).abs().to_numpy(float)
 
     n = len(df)
     labels = np.zeros(n, dtype=np.int8)
+    labels[:] = -1
 
     # okna: shape (n - T + 1, T)
     windows = sliding_window_view(closes, T)
@@ -509,9 +510,7 @@ def calc_label9(df: pd.DataFrame,
     no_hits = ~(any_up | any_dn)
     labels[:n - T + 1][no_hits] = (ret_paths[no_hits, -1] > 0).astype(np.int8)
 
-    # ostatnie T-1 elementów, gdzie nie ma pełnego okna → 0 (jak w oryginale)
-    # (albo można np. ustawić na NaN – zależy od preferencji)
-    return pd.Series(labels, index=df.index, dtype=np.int8)
+    return pd.Series(labels, index=df.index)
 
 def calc_label10(df: pd.DataFrame,
                  T: int = 15,
