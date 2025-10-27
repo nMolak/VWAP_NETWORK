@@ -42,6 +42,7 @@ from functools import partial
 from load_data import add_VWAP
 from parameters import sigma_val
 from filters import filters
+from load_data import repair_volume
 
 from labels import calc_label9
 
@@ -178,35 +179,37 @@ def apply_cooldown(mask_extreme, seq_len=10, cooldown=30):
 
 def get_effective_accuracy(model, X_val, y_val, scaler=None):
     """
-    Zwraca accuracy w sensie:
-    'jeśli model przewidział klasę k, to w ilu % przypadków miał rację'.
-
-    - dla 2 klas: [acc_klasy_0, acc_klasy_1]
-    - dla 3 klas: [acc_klasy_0, acc_klasy_1, acc_klasy_2]
+    Zwraca accuracy per klasa (precision):
+    - poprawnie dla modeli sigmoid (1 neuron)
+    - poprawnie dla softmax (>1 neuron)
     """
-
-    # --- Skalowanie (jeśli podano scaler)
     if scaler is not None:
         X_val = scaler.transform(X_val)
 
-    # --- Predykcje
     probs = model.predict(X_val, verbose=0)
-    y_pred = np.argmax(probs, axis=1)
-    n_classes = model.output_shape[-1]
 
-    # --- Macierz pomyłek
+    # --- rozróżnienie typu wyjścia ---
+    if probs.ndim == 1 or probs.shape[1] == 1:
+        # sigmoid -> 1 neuron -> progowanie
+        y_pred = (probs.ravel() > 0.5).astype(int)
+        n_classes = 2
+    else:
+        # softmax -> wybieramy indeks największego prawdopodobieństwa
+        y_pred = np.argmax(probs, axis=1)
+        n_classes = probs.shape[1]
+
     cm = confusion_matrix(y_val, y_pred, labels=np.arange(n_classes))
-
-    # --- Accuracy per klasa (precision)
     accs = []
     for i in range(n_classes):
-        total_pred = cm[:, i].sum()  # ile razy model przewidział klasę i
-        if total_pred == 0:
-            accs.append(0.0)
-        else:
-            accs.append(cm[i, i] / total_pred)  # trafienia / wszystkie predykcje tej klasy
+        total_pred = cm[:, i].sum()
+        accs.append(cm[i, i] / total_pred if total_pred > 0 else 0.0)
 
+    print(f"FUNKCJA get_effective_accuracy: wykryto {n_classes} klasy")
+    print(f"ZWRACAM ACCS: {accs}")
+    print("aaaa")
     return accs
+
+
 # def prepare_all_data(data_path, sigma, filters,
 #                      features_filename, split_ratio=0.70,
 #                      label_func=None, labels_filename=None, recalc_features=False):
@@ -369,35 +372,56 @@ def prepare_all_data(data_path, sigma, filters,
 
             df = pd.read_csv(csv_file)
             print(f"✅ Wczytano {len(df):,} rekordów z {csv_file.name}")
+            print(f"Wartości NaN: {(df.isna().sum()).sum()}")
 
-            # 1️⃣ VWAP
-            from load_data import add_VWAP
+
+            df = repair_volume(df, 30, log=True)
+            zeros_after = (df["volume"] == 0).sum()
+            if zeros_after > 0:
+                print(f"⚠️ {zeros_after} zerowych wolumenów pozostało po naprawie!")
+
+            # 1 VWAP
             df = add_VWAP(df, sigma)
             df["is_extreme"] = (df["close"] > df[f"vwap_plus_{sigma}_sigma"]) | \
                                (df["close"] < df[f"vwap_minus_{sigma}_sigma"])
             print(f"➕ Dodano VWAP + maskę is_extreme (True={df['is_extreme'].sum()})")
+            print(f"Po obliczeniu VWAP wartości NaN: {(df.isna().sum().sum())}")
 
-            # 2️⃣ Czyszczenie
-            from filters import filter_clean
-            from filters import filter_no_zero_inf_nan
-            before = len(df)
-            df = filter_clean()(df)
-            df = filter_no_zero_inf_nan()(df)
-
-
-            df.reset_index(drop=True, inplace=True)
-            print(f"🧹 filter_clean: {before:,} → {len(df):,}")
-
-            # 3️⃣ Label
+            # 2️⃣ Label
             if label_func is not None:
                 print("🏷️ Obliczam label...")
                 start_time = time()
-                y_series = label_func(df).dropna()
-                print(f"✅ Label obliczony ({len(y_series):,}) w {time()-start_time:.2f}s")
+                y_series = label_func(df)
+
+                n_minus1 = (y_series == -1).sum()
+                print(f"DEBUG: Label '-1' count (raw) = {n_minus1}")
+                print(f"DEBUG: df length before assign = {len(df)}")
+                print(f"DEBUG: y_series length = {len(y_series)}")
+
+                df["y_series"] = y_series
+                n_minus1 = (df["y_series"] == -1).sum()
+                print(f"✅ Label obliczony ({len(df) - n_minus1:,}/{len(df):,}) w {time() - start_time:.2f}s")
+                if n_minus1 > 0:
+                    print(f"⚠️ Pominięto {n_minus1} wierszy (brak pełnego okna T)")
             else:
                 raise ValueError("❌ Brak funkcji etykietującej (label_func)")
 
-            df = df.loc[y_series.index].copy()
+            # 3️⃣ Czyszczenie
+            from filters import filter_clean
+            before = len(df)
+            df = filter_clean()(df)
+
+            # usuń wiersze z brakami etykiet (-1)
+            if "y_series" in df.columns:
+                before_y = len(df)
+                df = df[df["y_series"] != -1]
+                removed_y = before_y - len(df)
+                if removed_y > 0:
+                    print(f"⚠️ Usunięto {removed_y:,} wierszy z y_series == -1")
+            else:
+                raise ValueError("Błąd! Brak y_series w df")
+
+            print(f"🧹 filter_clean: {before:,} → {len(df):,}")
 
             # 4️⃣ Filtry globalne
             for f in filters:
@@ -413,51 +437,20 @@ def prepare_all_data(data_path, sigma, filters,
                 print(f"⚠️ Brak ekstremalnych rekordów – pomijam {ticker_file.name}")
                 continue
 
-            # 6️⃣ Featury
-            features_path = ticker_file / "features" / f"{features_filename}.parquet"
-            if features_path.exists():
-                features_df = pd.read_parquet(features_path)
-                print(f"✅ Wczytano {len(features_df):,} wierszy z {features_path}")
-                if "timestamp" in features_df.columns:
-                    print("⚠️ Usuwam kolumnę timestamp z features")
-                    features_df = features_df.drop(columns=["timestamp"])
-                features_df = features_df.add_prefix("feature_")
-                df = pd.concat([df, features_df], axis=1)
-            else:
-                print(f"❌ Brak pliku {features_path}")
-                continue
-
+            # 6️⃣ Przygotowanie X, y
             feature_cols = [c for c in df.columns if c.startswith("feature_")]
-            print(f"🧠 {len(feature_cols)} kolumn feature_*: {feature_cols}")
-
-            # 🔎 Diagnostyka NaN/inf po złączeniu
-            bad_cols = []
-            for c in feature_cols:
-                n_nan = df[c].isna().sum()
-                n_inf = np.isinf(df[c]).sum()
-                if n_nan or n_inf:
-                    bad_cols.append((c, n_nan, n_inf))
-            if bad_cols:
-                print("⚠️ Znaleziono kolumny z NaN/inf:")
-                for c, n_nan, n_inf in bad_cols:
-                    print(f"   {c:25s} NaN={n_nan:,} | inf={n_inf:,}")
-
-            df = filter_clean()(df)
-            y_series = y_series.loc[df.index]
-
-            df = filter_no_zero_inf_nan()(df)
-            y_series = y_series.loc[df.index]
-
-            # dopasuj label
-            y_series = y_series.loc[df.index]
-
             X = df[feature_cols].to_numpy()
-            y = y_series.astype(int).to_numpy()
+            y = df["y_series"].astype(int).to_numpy()
+
             X_list.append(X)
             y_list.append(y)
+
             print(f"✅ Dodano {X.shape[0]:,} rekordów (X,y)")
 
-    # === SCALENIE ===
+        else:
+            continue
+
+    # === 🔗 SCALENIE ===
     print("\n=== 🔗 SCALENIE ===")
     X_all = np.vstack(X_list)
     y_all = np.concatenate(y_list)
@@ -472,14 +465,23 @@ def prepare_all_data(data_path, sigma, filters,
             if n or infn:
                 print(f"Kolumna {i}: NaN={n:,} | inf={infn:,}")
 
-    # === PODZIAŁ ===
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_all, y_all,
-        test_size=(1 - split_ratio),
-        shuffle=True,
-        random_state=42
-    )
-    print(f"📦 Split: X_train={X_train.shape}, X_test={X_test.shape}")
+    # === PODZIAŁ BEZ SHUFFLOWANIA ===
+    n = len(X_all)
+    train_size = int(n * 0.7)
+    start = int(n * 0.15)
+    end = start + train_size
+
+    X_train = X_all[start:end]
+    y_train = y_all[start:end]
+
+    # test: reszta z przodu i tyłu (opcjonalnie tylko jeden z fragmentów)
+    X_test = np.concatenate([X_all[:start], X_all[end:]])
+    y_test = np.concatenate([y_all[:start], y_all[end:]])
+
+    print(f"📦 Split (bez shuffle):")
+    print(f"  Całość:  {n:,}")
+    print(f"  Train:   {len(X_train):,} ({len(X_train) / n:.2%})  od {start} do {end}")
+    print(f"  Test:    {len(X_test):,} ({len(X_test) / n:.2%})  przód + tył")
 
     # === SCALER ===
     scaler = StandardScaler()
@@ -693,13 +695,13 @@ def train(data_path, label, features_filename, batch_size):
         print(f"Natomiast rozkład oczekiwany to {expected}")
 
         classes = np.unique(y_train)
+        print(f"KLAS: {classes}")
         class_weights_array = compute_class_weight(
             class_weight="balanced",
             classes=classes,
             y=y_train
         )
         class_weights = dict(zip(classes, class_weights_array))
-        class_weights[2] *= 3
         print(">>> Wyliczone class weights:", class_weights)
     else:
         class_weights = None
@@ -709,7 +711,7 @@ def train(data_path, label, features_filename, batch_size):
     # model.compile(
     #     optimizer=optimizer,
     #     loss='binary_crossentropy',
-    #     metrics=['accuracy']
+    #     metrics=['accuracy']f
     # )
 
     callback = tf.keras.callbacks.EarlyStopping(
@@ -740,7 +742,7 @@ def train(data_path, label, features_filename, batch_size):
         dropouts=meta["dropouts"], activation=meta["activation"], loss=meta["loss"]
     )
 
-    class_dir = Path("3_class")
+    class_dir = Path("2_class")
 
     model_dir = models_path / class_dir / model_name
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -1001,20 +1003,20 @@ def train(data_path, label, features_filename, batch_size):
     #     print(r   fe_best)
 
 from labels import calc_label10
+
 from functools import partial
 
 label_partials = [
-    partial(calc_label10, T=79, alpha=0.52, use_atr=True),
-    partial(calc_label10, T=75, alpha=0.52, use_atr=False),
-    partial(calc_label10, T=65, alpha=0.51, use_atr=False),
-    partial(calc_label10, T=70, alpha=0.53, use_atr=True),
-    partial(calc_label10, T=61, alpha=0.50, use_atr=False)
+    partial(calc_label9, T=40, alpha=0.72, use_atr=False),
+    partial(calc_label9, T=35, alpha=0.72, use_atr=False),
+    partial(calc_label9, T=40, alpha=0.80, use_atr=False),
+    partial(calc_label9, T=45, alpha=0.775, use_atr=False)
 ]
 
 data_path = "data/training_data"
 features_filename = "features00"
 
-batch_size = 128
+batch_size = 64
 
 for label in label_partials:
     for _ in range(10):
