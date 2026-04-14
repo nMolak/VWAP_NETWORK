@@ -22,3 +22,7 @@ just_help.py
 training_weights2.py
 training_weights3.py
 model_names.txt
+
+# Claude Code (local only)
+CLAUDE.md
+.claude/
